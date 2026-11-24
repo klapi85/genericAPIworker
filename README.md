@@ -33,3 +33,11 @@ curl -X POST -F "file=@/path/to/file" http://127.0.0.1:3000/process-file
 
 Uploaded files are saved in `uploads/` with generated names. Files larger than
 5 MB (5,000,000 bytes) are rejected.
+
+## Testing
+
+Run the Perl helper tests from the repository root with:
+
+```sh
+prove -v
+```
