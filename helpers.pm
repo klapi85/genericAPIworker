@@ -37,6 +37,8 @@ sub handle_request {
     return ('404 Not Found', "Not Found\n");
 }
 
+# Splits "METHOD PATH HTTP/x.y" into (METHOD, PATH). Returns an empty list
+# if the line is missing or malformed.
 sub parse_request_line {
     my ($line) = @_;
     return if !defined $line;
@@ -44,6 +46,9 @@ sub parse_request_line {
     return ($1, $2);
 }
 
+# Reads header lines up to the blank line that ends them, leaving $fh at the
+# start of the body. Only the headers the server uses are kept; any malformed
+# line or a repeated Content-Length marks the request as invalid.
 sub read_headers {
     my ($fh) = @_;
     my %headers = (
@@ -87,9 +92,12 @@ sub read_body {
     return $body;
 }
 
+# Handles POST /process-file: checks the declared size, reads the body, pulls
+# out the "file" field and saves it to upload_dir.
 sub process_file_upload {
     my ($fh, $headers, $options) = @_;
     my $max_file_size = $options->{max_file_size};
+    # Leave 64 KB for the multipart boundaries and part headers around the file.
     my $max_request_size = $max_file_size + 64 * 1024;
 
     return ('411 Length Required', "Content-Length is required\n")
@@ -134,6 +142,9 @@ sub save_upload {
     return ($saved_name, undef);
 }
 
+# Parses a multipart/form-data body and returns the contents of the single
+# file field named "file". Returns ($file_data, undef) on success or
+# (undef, $error_message) if the request is invalid.
 sub extract_uploaded_file {
     my ($body, $content_type) = @_;
     return (undef, 'Content-Type must be multipart/form-data')
@@ -146,6 +157,7 @@ sub extract_uploaded_file {
     return (undef, 'Invalid multipart boundary')
         if !defined($boundary) || $boundary !~ /\A[A-Za-z0-9'()+_,.\/:=?-]{1,70}\z/;
 
+    # Each part starts with "--boundary" on its own line; the last one ends with "--boundary--".
     my $marker = "--$boundary";
     return (undef, 'Malformed multipart body')
         if substr($body, 0, length($marker) + 2) ne "$marker\r\n";
@@ -154,6 +166,8 @@ sub extract_uploaded_file {
     my $uploaded_file;
     while (1) {
         my ($separator, $after_marker, $suffix);
+        # Find the next real boundary line. The marker text can also appear inside
+        # file data, so only accept it when followed by "--" or a line ending.
         my $search_position = $position;
         while (1) {
             $separator = index($body, "\r\n$marker", $search_position);
@@ -165,12 +179,14 @@ sub extract_uploaded_file {
             $search_position = $separator + 2;
         }
 
+        # A part is its headers, a blank line, then its data.
         my $part = substr($body, $position, $separator - $position);
         my $header_end = index($part, "\r\n\r\n");
         return (undef, 'Malformed multipart part') if $header_end < 0;
 
         my $part_headers = substr($part, 0, $header_end);
         my $part_data = substr($part, $header_end + 4);
+        # Only a part with name="file" and a filename counts as the upload.
         my $is_file_field = 0;
         for my $header (split /\r\n/, $part_headers) {
             if ($header =~ /\AContent-Disposition:\s*form-data\b(.*)\z/i) {
@@ -187,6 +203,7 @@ sub extract_uploaded_file {
             $uploaded_file = $part_data;
         }
 
+        # "--boundary--" closes the body; only an optional CRLF may follow it.
         if ($suffix eq '--') {
             my $ending = substr($body, $after_marker + 2);
             return (undef, 'Malformed multipart ending')
@@ -201,6 +218,8 @@ sub extract_uploaded_file {
     return ($uploaded_file, undef);
 }
 
+# Builds a complete plain-text HTTP response. $extra_header is an optional
+# single header line without the trailing CRLF, e.g. 'Allow: POST'.
 sub format_response {
     my ($status, $body, $extra_header) = @_;
     my $headers = "HTTP/1.1 $status\r\n"

@@ -1,11 +1,16 @@
+# Tests for the HTTP request flow in helpers.pm: reading the request line,
+# headers and body from a connection, routing, saving uploads, and formatting
+# the response. In-memory filehandles stand in for the client socket.
+
 use strict;
 use warnings;
 use FindBin qw($Bin);
 use lib "$Bin/..";
 use File::Temp qw(tempdir);
 use Test::More;
-use helpers qw(handle_request parse_request_line read_body read_headers);
+use helpers qw(format_response handle_request parse_request_line read_body read_headers);
 
+# Returns a read filehandle over $data, so a string can act like a client connection.
 sub fh_for {
     my ($data) = @_;
     open my $fh, '<', \$data or die "Cannot open in-memory filehandle: $!";
@@ -13,15 +18,19 @@ sub fh_for {
     return $fh;
 }
 
+# Uploads go to a temporary folder that is deleted after the tests.
+# A small max_file_size makes the size limits easy to hit.
 my $upload_dir = tempdir(CLEANUP => 1);
 my %options = (upload_dir => $upload_dir, max_file_size => 100);
 
+# Runs a raw HTTP request string through handle_request and returns
+# ($status, $body, $extra_header).
 sub request {
     my ($raw, $opts) = @_;
     return handle_request(fh_for($raw), $opts || \%options);
 }
 
-# parse_request_line
+# parse_request_line: "METHOD PATH HTTP/x.y" followed by a line ending.
 is_deeply([parse_request_line("POST /hello HTTP/1.1\r\n")], ['POST', '/hello'],
     'parses a valid request line');
 is_deeply([parse_request_line("GET / HTTP/1.0\n")], ['GET', '/'],
@@ -29,7 +38,7 @@ is_deeply([parse_request_line("GET / HTTP/1.0\n")], ['GET', '/'],
 is_deeply([parse_request_line("garbage\r\n")], [], 'rejects a malformed request line');
 is_deeply([parse_request_line(undef)], [], 'rejects a missing request line');
 
-# read_headers
+# read_headers: collects the headers the server cares about and flags bad ones.
 my $headers = read_headers(fh_for(
     "Content-Length: 12\r\nContent-Type: text/plain \r\nX-Other: yes\r\n\r\nbody"));
 is($headers->{content_length}, 12, 'reads Content-Length');
@@ -44,16 +53,17 @@ ok(!read_headers(fh_for("not a header\r\n\r\n"))->{valid},
 ok(read_headers(fh_for("Transfer-Encoding: chunked\r\n\r\n"))->{transfer_encoding_seen},
     'detects Transfer-Encoding');
 
+# The body must still be readable after the headers have been read.
 my $after_headers = fh_for("A: b\r\n\r\nrest");
 read_headers($after_headers);
 is(do { local $/; <$after_headers> }, 'rest', 'stops reading at the blank line');
 
-# read_body
+# read_body: reads exactly Content-Length bytes.
 is(read_body(fh_for("abcdef"), 4), 'abcd', 'reads exactly the requested length');
 is(read_body(fh_for(''), 0), '', 'reads an empty body');
 ok(!defined read_body(fh_for("abc"), 10), 'returns undef on a short body');
 
-# handle_request routing
+# handle_request: each check returns the matching error before routing.
 is((request("garbage\r\n\r\n"))[0], '400 Bad Request', 'bad request line -> 400');
 is((request("POST /hello HTTP/1.1\r\nbad\r\n\r\n"))[0], '400 Bad Request',
     'bad header -> 400');
@@ -68,8 +78,11 @@ is_deeply([request("POST /hello HTTP/1.1\r\n\r\n")], ['200 OK', 'Hello World'],
     'POST /hello -> Hello World');
 is((request("POST /missing HTTP/1.1\r\n\r\n"))[0], '404 Not Found', 'unknown path -> 404');
 
-# /process-file
+# /process-file: the upload endpoint.
 my $boundary = 'b0undary';
+
+# Builds a raw upload request. Options override parts of it to create error cases:
+# body, content_length, content_type, or no_length to omit Content-Length.
 sub upload_request {
     my ($file_data, %args) = @_;
     my $body = $args{body} // "--$boundary\r\n"
@@ -85,6 +98,7 @@ sub upload_request {
         . $body;
 }
 
+# A successful upload must save the exact bytes, including a NUL byte.
 my ($status, $message) = request(upload_request("hello\0world"));
 is($status, '201 Created', 'valid upload -> 201');
 my ($saved_name) = $message =~ /File uploaded as (\S+)/;
@@ -94,10 +108,12 @@ open my $saved_fh, '<:raw', $saved_path or die "Cannot open $saved_path: $!";
 is(do { local $/; <$saved_fh> }, "hello\0world", 'saved file matches uploaded bytes');
 close $saved_fh;
 
+# Content-Length checks happen before the body is read.
 is((request(upload_request('x', no_length => 1)))[0], '411 Length Required',
     'missing Content-Length -> 411');
 is((request(upload_request('x', content_length => 100 + 64 * 1024 + 1)))[0],
     '413 Content Too Large', 'oversized request -> 413');
+# Content-Length larger than the data sent means the body ends early.
 is((request(upload_request('x', content_length => 500)))[0], '400 Bad Request',
     'truncated body -> 400');
 
@@ -105,8 +121,16 @@ my @wrong_type = request(upload_request('x', content_type => 'text/plain'));
 is($wrong_type[0], '400 Bad Request', 'non-multipart upload -> 400');
 like($wrong_type[1], qr/multipart\/form-data/, 'reports the parse error');
 
+# The request is within the limit, but the file inside it is over max_file_size.
 my @too_big = request(upload_request('x' x 101));
 is($too_big[0], '413 Content Too Large', 'file over max_file_size -> 413');
 like($too_big[1], qr/File must not be larger/, 'reports the file size limit');
+
+# format_response: builds the raw HTTP response text sent to the client.
+my $response = format_response('405 Method Not Allowed', "Method Not Allowed\n", 'Allow: POST');
+like($response, qr/\AHTTP\/1\.1 405 Method Not Allowed\r\n/, 'formats the status line');
+like($response, qr/Content-Length: 19\r\n/, 'formats the response content length');
+like($response, qr/Allow: POST\r\n/, 'includes an optional response header');
+like($response, qr/\r\n\r\nMethod Not Allowed\n\z/, 'separates headers from response body');
 
 done_testing();
