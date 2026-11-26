@@ -4,7 +4,62 @@ use strict;
 use warnings;
 use Exporter qw(import);
 
-our @EXPORT_OK = qw(extract_uploaded_file format_response);
+our @EXPORT_OK = qw(extract_uploaded_file format_response read_request read_request_body);
+
+sub read_request {
+    my ($client) = @_;
+
+    my $request_line = <$client>;
+    return if !defined $request_line
+        || $request_line !~ /\A(\S+)\s+(\S+)\s+HTTP\/\d(?:\.\d)?\r?\n\z/;
+    my ($method, $path) = ($1, $2);
+
+    my $content_length = 0;
+    my $content_type;
+    my $content_length_seen = 0;
+    my $transfer_encoding_seen = 0;
+
+    while (my $line = <$client>) {
+        last if $line eq "\r\n" || $line eq "\n";
+
+        if ($line =~ /\AContent-Length:\s*(\d+)\s*\r?\n\z/i) {
+            return if $content_length_seen;
+            $content_length = $1;
+            $content_length_seen = 1;
+        } elsif ($line =~ /\AContent-Type:\s*(.*?)\s*\r?\n\z/i) {
+            $content_type = $1;
+        } elsif ($line =~ /\ATransfer-Encoding:/i) {
+            $transfer_encoding_seen = 1;
+        } elsif ($line !~ /\A[^:\r\n]+:\s*.*\r?\n\z/) {
+            return;
+        }
+    }
+
+    return {
+        method                  => $method,
+        path                    => $path,
+        content_length          => $content_length,
+        content_length_seen     => $content_length_seen,
+        content_type            => $content_type,
+        transfer_encoding_seen  => $transfer_encoding_seen,
+    };
+}
+
+sub read_request_body {
+    my ($client, $content_length) = @_;
+    my $body = '';
+    my $remaining = $content_length;
+
+    while ($remaining > 0) {
+        my $buffer;
+        my $read = read($client, $buffer, $remaining);
+        return if !defined($read) || $read == 0;
+        $body .= $buffer;
+        $remaining -= $read;
+    }
+
+    return $body;
+}
 
 sub extract_uploaded_file {
     my ($body, $content_type) = @_;

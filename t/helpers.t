@@ -3,7 +3,62 @@ use warnings;
 use FindBin qw($Bin);
 use lib "$Bin/..";
 use Test::More;
-use helpers qw(extract_uploaded_file format_response);
+use helpers qw(extract_uploaded_file format_response read_request read_request_body);
+
+sub input_handle {
+    my ($data) = @_;
+    open my $handle, '<', \$data or die "Could not open scalar input: $!";
+    binmode $handle;
+    return $handle;
+}
+
+my $request_reader = input_handle(
+    "POST /process-file HTTP/1.1\r\n"
+        . "Content-Length: 42\r\n"
+        . "Content-Type: multipart/form-data; boundary=example\r\n"
+        . "\r\n",
+);
+my $request = read_request($request_reader);
+is_deeply(
+    $request,
+    {
+        method                 => 'POST',
+        path                   => '/process-file',
+        content_length         => 42,
+        content_length_seen    => 1,
+        content_type           => 'multipart/form-data; boundary=example',
+        transfer_encoding_seen => 0,
+    },
+    'parses the request line and headers',
+);
+
+my $bad_request_reader = input_handle("POST /hello\r\n\r\n");
+ok(!defined read_request($bad_request_reader), 'rejects a malformed request line');
+
+my $bad_headers_reader = input_handle(
+    "POST /hello HTTP/1.1\r\n"
+        . "Content-Length: 1\r\n"
+        . "Content-Length: 2\r\n"
+        . "\r\n",
+);
+ok(!defined read_request($bad_headers_reader), 'rejects duplicate Content-Length headers');
+
+my $transfer_reader = input_handle(
+    "POST /hello HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+);
+my $transfer_request = read_request($transfer_reader);
+ok($transfer_request->{transfer_encoding_seen}, 'records Transfer-Encoding headers');
+
+my $binary_request_body = "data\0with binary\r\n";
+my $body_reader = input_handle($binary_request_body);
+is(
+    read_request_body($body_reader, length $binary_request_body),
+    $binary_request_body,
+    'reads the complete request body without changing binary data',
+);
+
+my $short_body_reader = input_handle('short');
+ok(!defined read_request_body($short_body_reader, 10), 'rejects an incomplete request body');
 
 my $boundary = 'test-boundary';
 sub multipart_part {
