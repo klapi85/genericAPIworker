@@ -1,5 +1,5 @@
 # genericAPIworker
-Perl experiment to implement serwer-side file processing.
+Perl exercise to implement server-side file processing.
 
 ## API
 
