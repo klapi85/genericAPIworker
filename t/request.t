@@ -108,6 +108,15 @@ open my $saved_fh, '<:raw', $saved_path or die "Cannot open $saved_path: $!";
 is(do { local $/; <$saved_fh> }, "hello\0world", 'saved file matches uploaded bytes');
 close $saved_fh;
 
+# The optional on_upload callback is told the saved name, and only on success.
+my @notified;
+my %hook_options = (%options, on_upload => sub { push @notified, @_ });
+my (undef, $hook_message) = request(upload_request('data'), \%hook_options);
+my ($hook_name) = $hook_message =~ /File uploaded as (\S+)/;
+is_deeply(\@notified, [$hook_name], 'on_upload receives the saved file name');
+request(upload_request('x' x 101), \%hook_options);
+is(scalar @notified, 1, 'on_upload is not called for a rejected upload');
+
 # Content-Length checks happen before the body is read.
 is((request(upload_request('x', no_length => 1)))[0], '411 Length Required',
     'missing Content-Length -> 411');

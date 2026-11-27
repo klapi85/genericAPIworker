@@ -19,7 +19,8 @@ our @EXPORT_OK = qw(
 my @BAD_REQUEST = ('400 Bad Request', "Bad Request\n");
 
 # Reads one HTTP request from $fh and returns the response as
-# ($status, $body, $extra_header). $options needs upload_dir and max_file_size.
+# ($status, $body, $extra_header). $options needs upload_dir and max_file_size;
+# an optional on_upload callback is called with the saved file name.
 sub handle_request {
     my ($fh, $options) = @_;
 
@@ -119,6 +120,7 @@ sub process_file_upload {
         warn "Could not save uploaded file: $save_error\n";
         return ('500 Internal Server Error', "Could not save uploaded file\n");
     }
+    $options->{on_upload}->($saved_name) if $options->{on_upload};
     return ('201 Created', "File uploaded as $saved_name\n");
 }
 
